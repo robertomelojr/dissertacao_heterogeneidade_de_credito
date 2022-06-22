@@ -1,0 +1,909 @@
+---
+title: "Dissertação"
+output:
+  html_document: default
+  pdf_document: default
+date: '2022-06-10'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# limpando instancia 
+rm(list = ls())
+gc()
+#importando pacotes
+library(readr)
+library(dplyr)
+library(data.table)
+library(dplyr)
+library(readxl)
+library(psych)
+library(bit64)
+library(survey)
+library(srvyr)
+library(tidyverse)
+library(lubridate)
+library(ggthemes)
+library(hrbrthemes)
+library(ggplot2)
+library(plotly)
+library(forecast)
+library(tsibble)
+library(outliers)
+library(estimatr)
+```
+
+## Importando dados e criando variáveis
+
+```{r}
+setwd('D:/dissertacao/dados/descompactados')
+
+df_scr<- data.table::fread("D:/dissertacao/dados/df_scr_sem_cnae.csv", encoding = 'UTF-8') #base utilizada na presente análise
+
+
+
+df_scr_sem_pf<- df_scr%>%
+  filter(cliente !="PF")
+
+df_scr_sem_pf$crise_marco=NA
+df_scr_sem_pf$crise_marco = ifelse(df_scr_sem_pf$data_base >= "2020-02-29", 1, 0)
+
+
+# filtro de dados
+
+{
+# filtros por linha de crédito 
+df_scr_sem_pf$tipos_modalidade = NA
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Capital de giro" ] = 1 
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Capital de giro rotativo" ] = 2
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Comércio exterior" ] = 3
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Financiamento de infraestrutura/desenvolvimento/projeto e outros créditos" ] = 4
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Habitacional" ] = 5
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Investimento" ] = 6
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Operações com recebíveis" ] = 7
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Outros créditos" ] = 8
+df_scr_sem_pf$tipos_modalidade[df_scr_sem_pf$modalidade=="PJ - Rural e agroindustrial" ] = 9
+
+df_scr_sem_pf$tipo_origem = ifelse(df_scr_sem_pf$origem =="Com destinação específica", 1, 0)
+
+#por porte de maneira multinomial (1,2,3...)
+
+df_scr_sem_pf$tipo_porte =NA
+df_scr_sem_pf$tipo_porte[df_scr_sem_pf$porte=="PJ - Grande" ] = 1 
+df_scr_sem_pf$tipo_porte[df_scr_sem_pf$porte=="PJ - Indisponível" ] = 2
+df_scr_sem_pf$tipo_porte[df_scr_sem_pf$porte=="PJ - Médio" ] = 3
+df_scr_sem_pf$tipo_porte[df_scr_sem_pf$porte=="PJ - Micro" ] = 4
+df_scr_sem_pf$tipo_porte[df_scr_sem_pf$porte=="PJ - Pequeno" ] = 5
+
+df_scr_sem_pf<-df_scr_sem_pf%>%
+  filter(tipo_porte!=2,data_base != '2019-07-31')
+#micro e pequena
+df_scr_sem_pf$micro_e_pequeno_x_grande<-ifelse(df_scr_sem_pf$tipo_porte>=4, 1,ifelse(df_scr_sem_pf$tipo_porte == 1, 0, NA))
+#grande x micro
+df_scr_sem_pf$micro_x_grande<-ifelse(df_scr_sem_pf$tipo_porte==4, 1,ifelse(df_scr_sem_pf$tipo_porte == 1, 0, NA))
+#mpexgrande
+df_scr_sem_pf$mpe_x_grande<-ifelse(df_scr_sem_pf$tipo_porte>=3, 1,ifelse(df_scr_sem_pf$tipo_porte == 1, 0, NA))
+
+## covariadas
+df_scr_sem_pf$ln_carteira_inadimplida_arrastada <-log(df_scr_sem_pf$carteira_inadimplida_arrastada)
+
+## LOG DO IBCBR##
+df_scr_sem_pf$ln_ibc_br <- log(df_scr_sem_pf$IBC_Br_indice)
+
+df_scr_sem_pf <- df_scr_sem_pf %>% mutate(diff_ln_ibc = difference(ln_ibc_br))
+  
+df_scr_sem_pf <- df_scr_sem_pf %>% mutate(inad = carteira_inadimplida_arrastada / carteira_ativa)
+  
+df_scr_sem_pf <- df_scr_sem_pf %>% mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+
+
+## dummies para o tridiff
+
+df_scr_sem_pf$giro_x_hab<-ifelse(df_scr_sem_pf$tipos_modalidade ==1, 1,ifelse(df_scr_sem_pf$tipos_modalidade == 5, 0, NA))
+df_scr_sem_pf$micro_x_grande<-ifelse(df_scr_sem_pf$tipo_porte==4, 1,ifelse(df_scr_sem_pf$tipo_porte == 1, 0, NA))
+
+df_scr_sem_pf$invest_x_giro<-ifelse(df_scr_sem_pf$tipos_modalidade==1, 1,ifelse(df_scr_sem_pf$tipos_modalidade == 6, 0, NA))
+
+
+
+}
+
+## dfs para gráficos do diff
+
+{
+df_habitacional_com_destinacao <- df_scr_sem_pf %>%
+  filter(tipos_modalidade==5,tipo_origem==1,tipo_porte!=2) %>%
+  summarise(Total_carteira = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))
+
+
+#                                                           ### RURAL COM DESTINA??O##
+
+
+df_rural_com_destinacao <- df_scr_sem_pf %>%
+  group_by(porte,data_base) %>%
+  filter(tipos_modalidade==9,tipo_origem==1,tipo_porte!=2) %>%
+  summarise(Total_carteira = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))
+
+
+                                                                      ##CAPITAL DE GIRO
+df_capital_sem_destinacao <- df_scr_sem_pf %>%
+  group_by(porte,data_base) %>%
+  filter(tipos_modalidade==1|tipos_modalidade==2,tipo_origem==0,tipo_porte!=2) %>%
+  summarise(Total_carteira = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))
+}
+
+```
+
+## Validação do tridiff
+```{r}
+# Estimand oo tridiff na mão 
+{
+# tridiff com hab e giro
+
+# (giro_micro - hab_micro) - (giro_grande - hab_grande) -> pós crise
+
+giro_micro_pos <- df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==4,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+hab_micro_pos <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==5,tipo_porte==4,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+giro_grande_pos <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==1,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+hab_grande_pos <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==5,tipo_porte==1,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+pos_covid<- (giro_micro_pos-hab_micro_pos)- (giro_grande_pos - hab_grande_pos) 
+
+
+#(giro_micro - hab_micro) - (giro_grande - hab_grande) -> antes crise
+
+giro_micro_pre <- df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==4,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+hab_micro_pre <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==5,tipo_porte==4,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+giro_grande_pre <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==1,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+hab_grande_pre <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==5,tipo_porte==1,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+pre_covid<- (giro_micro_pre - hab_micro_pre)- (giro_grande_pre - hab_grande_pre) 
+
+  #tridiff   
+
+tri_diff_validacao_hab <- pre_covid - pos_covid
+
+
+
+### invest tridiff ##### 
+
+# (giro_micro - hab_micro) - (giro_grande - hab_grande) -> pós crise
+
+giro_micro_pos <- df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==4,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+invest_micro_pos <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==6,tipo_porte==4,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+giro_grande_pos <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==1,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+invest_grande_pos <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==6,tipo_porte==1,crise_marco==1) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+pos_covid_invest<- (giro_micro_pos-hab_micro_pos)- (giro_grande_pos - hab_grande_pos) 
+
+
+#(giro_micro - hab_micro) - (giro_grande - hab_grande) -> antes crise
+
+giro_micro_pre <- df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==4,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+invest_micro_pre <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==6,tipo_porte==4,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+giro_grande_pre <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==1,tipo_porte==1,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+invest_grande_pre <-  df_scr_sem_pf %>%
+  filter(tipos_modalidade==6,tipo_porte==1,crise_marco==0) %>%
+  summarize(efeito_medio= mean(log(carteira_ativa)))
+
+pre_covid_invest<- (giro_micro_pre - invest_micro_pre)- (giro_grande_pre - invest_grande_pre) 
+
+  #tridiff   
+
+tri_diff_validacao_invest <- pos_covid_invest - pre_covid_invest
+
+}
+## estimação tridiff sem controles
+
+
+tridiff_valid_hab <- summary(lm(log(carteira_ativa) ~ grande_x_micro + hab_x_giro + crise_marco +
+               grande_x_micro*hab_x_giro + +grande_x_micro*crise_marco +
+               hab_x_giro*crise_marco + hab_x_giro*crise_marco*grande_x_micro,data = df_scr_sem_pf))
+
+tridiff_valid_hab
+
+tridiff_valid_invest <- summary(lm(log(carteira_ativa) ~ grande_x_micro + invest_x_giro + crise_marco +
+               grande_x_micro*invest_x_giro + +grande_x_micro*crise_marco +
+               invest_x_giro*crise_marco + invest_x_giro*crise_marco*grande_x_micro,data = df_scr_sem_pf))
+
+```
+## TRIDIFF INVEST
+```{r}
+tridiff_valid_invest
+
+```
+
+
+### Detectando e tratando Outliers
+```{r}
+
+box <- df_scr_sem_pf %>%
+  filter(tipos_modalidade==1, tipo_porte==1, data_base >='2019-01-31' & data_base <'2019-10-31') %>% 
+  group_by(data_base,V1)%>%
+  summarise(carteira_ativa= sum(carteira_ativa))
+box
+
+outlier <- boxplot.stats(box$carteira_ativa)$out
+
+outlier_2 <-outlier(box$carteira_ativa)
+
+boxplot(box$carteira_ativa)
+
+par(mfrow=c(1,2))
+
+plot(box$data_base, box$carteira_ativa, main = "Desvio na Carteira Ativa do Capital de Giro - Pj Micro",
+     xlab = "Data", ylab= 'Carteira Ativa',pch = 20, col = "red",cex=2) +
+abline(lm(carteira_ativa ~ data_base, data = box), col = ' black',lwd=2,lty=2)
+
+```
+
+# Tratando Outliers dos pj micro capital de giro
+```{r}
+
+par(mfrow = c(1,1))
+
+x <- box
+
+q1 = quantile(box$carteira_ativa,0.25)
+q3 = quantile(box$carteira_ativa,0.75)
+
+iq = q3 - q1
+lim_inf = q1 - 1.5*iq
+lim_sup = q3 + 1.25*iq
+
+x$carteira_ativa > lim_sup
+x$carteira_ativa < lim_inf
+
+out = ( x$carteira_ativa > lim_sup | x$carteira_ativa < lim_inf)
+
+x$carteira_ativa[out] <- NA
+
+boxplot(x$carteira_ativa) # sem outliers
+
+boxplot(box$carteira_ativa) #com outliers
+
+
+box$carteira_ativa[out] = NA
+
+plot(box$data_base, box$carteira_ativa, main = "Desvio na Carteira Ativa do Capital de Giro - Pj Micro",
+     xlab = "Data", ylab= 'Carteira Ativa',pch = 20, col = "black",cex=1.5) +
+abline(lm(carteira_ativa ~ data_base, data = box), col = ' red',lwd=2,lty=2)
+
+```
+
+
+```{r}
+df_scr_sem_pf %>%
+  filter(tipos_modalidade==1) %>% 
+  group_by(porte,data_base)%>%
+  summarise(carteira_ativa= sum(carteira_ativa)) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa))) +
+  geom_line(color = 'black') +
+  labs(title = " Carteira Ativa por Porte")+
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~porte, scales = 'free') +
+  theme(legend.position = 'none')
+```
+
+```{r}
+
+df_scr_sem_pf %>%
+  filter(tipos_modalidade==5) %>% 
+  group_by(porte,data_base)%>%
+  summarise(carteira_ativa= sum(carteira_ativa)) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa))) +
+  geom_line(color = 'black') +
+  labs(title = " Carteira Ativa por Porte")+
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~porte, scales = 'free') +
+  theme(legend.position = 'none')
+
+```
+
+
+
+
+## Gráfico por modalidade
+```{r}
+
+df_scr_sem_pf %>%
+  filter(tipo_porte==4) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa), group = modalidade)) +
+  geom_line(color = 'black') +
+  labs(title = " Micro por Modalidade")+
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~modalidade,scales = 'free') +
+  theme(legend.position = 'none')
+```
+
+```{r}
+
+df_scr_sem_pf %>%
+  filter(tipo_porte==1) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa), group = modalidade)) +
+  geom_line(color = 'black') +
+  labs(title = " Grande por Modalidade")+
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~modalidade, scales = 'free') +
+  theme(legend.position = 'none')
+```
+
+## Capital de Giro por porte
+
+```{r}
+
+df_scr_sem_pf %>%
+  filter(tipos_modalidade==1) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa), group = porte)) +
+  geom_line(color = 'black') +
+  labs(title = "Capital de Giro por Porte") +
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~porte) +
+  theme(legend.position = 'none')
+```
+
+## Habitacional por Porte 
+```{r}
+df_scr_sem_pf %>%
+  filter(tipos_modalidade==5) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa), group = porte)) +
+  geom_line(color = 'black') +
+  labs(title = "Habitacional por Porte")+
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~porte, scales = 'free') +
+  theme(legend.position = 'none')
+```
+
+## Investimento por Porte 
+```{r}
+df_scr_sem_pf %>%
+  filter(tipos_modalidade==6) %>%
+  ggplot(aes(x = data_base, y = log(carteira_ativa), group = porte)) +
+  geom_line(color = 'black') +
+  labs(title = "Investimento por Porte")+
+  geom_vline(aes(xintercept = as.numeric(df_scr_sem_pf$data_base[3320])),linetype = 4, color='red' )+
+  labs(y = 'log da Carteira Ativa', x = 'Data') +
+  facet_wrap(~porte, scales = 'free') +
+  theme(legend.position = 'none')
+```
+
+
+## Iniciando a análise do DIFF DIFF
+
+```{r}
+
+ggplot(df_scr_sem_pf,mapping = aes(x = grande_x_micro,y = log(carteira_ativa)))+
+  stat_summary(geom="pointrange", fun.data = "mean_se", fun.args = list(mult =1.96)) +
+  facet_wrap(vars(crise_marco))
+```
+
+## Montando as tendencias paralelas
+
+```{r}
+
+diffs <- df_scr_sem_pf %>%
+  group_by(crise_marco,grande_x_micro) %>%
+  summarize(efeito_medio = mean(log(carteira_ativa))) %>%
+  na.omit(diffs)
+
+tratado_pre <- diffs %>%
+  filter(grande_x_micro == 1,crise_marco==0) %>%
+  pull(efeito_medio)
+
+controle_pre <-  diffs %>%
+  filter(grande_x_micro == 0,crise_marco==0) %>%
+  pull(efeito_medio)
+
+tratado_pos <-  diffs %>%
+  filter(grande_x_micro == 1,crise_marco==1) %>%
+  pull(efeito_medio)
+
+controle_pos <-  diffs %>%
+  filter(grande_x_micro == 0,crise_marco==1) %>%
+  pull(efeito_medio)
+
+
+tratado_diff <- (tratado_pos - tratado_pre ) 
+
+controle_diff <-  (controle_pos - controle_pre) 
+
+
+diff_diff <- tratado_diff - controle_diff
+
+```
+
+```{r}
+ggplot(data = diffs,aes(x=crise_marco, y= efeito_medio,
+                        color = grande_x_micro)) +
+  geom_point() +
+  geom_line(aes(group = grande_x_micro )) +
+  annotate(geom = "segment", x=0 , xend = 1,
+           y = tratado_pre, yend =  tratado_pos - diff_diff,
+           linetype = "dotted") +
+  annotate(geom = "segment", x = 1, xend = 1, y = tratado_pos - diff_diff, yend = tratado_pos, 
+           color = 'red')
+
+```
+
+```{r}
+
+ggplot(data = diffs,aes(x=crise_marco, y= efeito_medio,
+                        color = grande_x_micro)) +
+  geom_point() +
+  geom_line(aes(group = grande_x_micro )) +
+  annotate(geom = "segment", x=0 , xend = 1,
+           y = tratado_pre, yend =  tratado_pos - diff_diff,
+           linetype = "dotted") +
+  annotate(geom = "segment", x = 1, xend = 1, y = tratado_pos - diff_diff, yend = tratado_pos, 
+           color = 'red')
+
+```
+
+#TENDENCIAS PARALELAS
+```{r}
+#### Trajetórias paralelas -----
+# Adicionando Nota Final
+
+
+
+###### Gráfico log médio micro giro x grande giro  ----
+controle = df_scr_sem_pf %>%filter(data_base <= "2020-02-29" & tipo_porte == 1 & tipos_modalidade == 1) %>%
+  group_by(data_base, porte) %>% 
+  summarise(media = mean(log(carteira_ativa), na.rm = T)) 
+
+
+tratado =  df_scr_sem_pf %>%filter(data_base <= "2020-02-29" & tipo_porte == 4 & tipos_modalidade == 1) %>%
+  group_by(data_base, porte) %>% 
+  summarise(media = mean(log(carteira_ativa), na.rm = T))
+
+tendencias_paralelas = ggplot()+
+  geom_line(data=controle,aes(y=media,x= data_base,colour="Grandes Empresas"), size=1, linetype=2 )+
+  geom_line(data=tratado,aes(y=media,x= data_base,colour="Micro Empresas"),size=1)  +
+  scale_color_manual(values = c("firebrick", "darkblue")) + 
+  labs(y = ' Log Médio', x = 'Ano', colour = '') +
+  theme_minimal() +
+  theme(legend.position = "bottom") 
+
+tendencias_paralelas
+
+ggsave(filename = 'trajetorias_paralelas.png', tendencias_paralelas,
+       width = 5, height = 3, dpi = 300, device = 'png')
+
+```
+
+
+### DIFF - DIFF
+```{r}
+
+df_scr_sem_pf <- df_scr_sem_pf %>%
+    as_tsibble(key = c("porte", "modalidade"), index = data_base )
+
+diff_m_x_g <- summary(lm(log(carteira_ativa) ~ crise_marco + grande_x_micro + crise_marco * grande_x_micro + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad, df_scr_sem_pf))
+
+diff_mp_x_g <- summary(lm(log(carteira_ativa) ~ crise_marco + grande_x_micro_e_pequeno + crise_marco * grande_x_micro_e_pequeno + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad, df_scr_sem_pf))
+
+
+diff_mpe_x_grande <- summary(lm(log(carteira_ativa) ~ crise_marco + grande_x_mpe + crise_marco * grande_x_mpe + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br, df_scr_sem_pf))
+
+
+summary(lm(log(carteira_ativa) ~ giro_x_hab + crise_marco + giro_x_hab:crise_marco  +  giro_x_hab:crise_marco:micro_x_grande + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad, df_scr_sem_pf))
+
+```
+## TESTE
+```{r}
+ df_scr_sem_pf$giro_x_hab_micro_x_grande<-ifelse(df_scr_sem_pf$tipo_porte == 4 & df_scr_sem_pf$tipos_modalidade== 1 |df_scr_sem_pf$tipo_porte == 4 & df_scr_sem_pf$tipos_modalidade== 5 , 1,
+                                                  ifelse(df_scr_sem_pf$tipo_porte == 1 & df_scr_sem_pf$tipos_modalidade== 1 |df_scr_sem_pf$tipo_porte == 1 & df_scr_sem_pf$tipos_modalidade== 5  , 0, NA))
+ table(df_scr_sem_pf$giro_x_hab_micro_x_grande, df_scr_sem_pf$porte) 
+ 
+summary(lm(log(carteira_ativa) ~ giro_x_hab + crise_marco + giro_x_hab*crise_marco  +  giro_x_hab_micro_x_grande:crise_marco + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad, df_scr_sem_pf))
+
+
+
+```
+## TRIPLE DIFF
+```{r}
+
+#mpexgrande
+df_scr_sem_pf$g_med_x_mp<-ifelse(df_scr_sem_pf$tipo_porte>=4, 1,ifelse(df_scr_sem_pf$tipo_porte == 1 |df_scr_sem_pf$tipo_porte == 3, 0, NA))
+
+tri_diff_g_x_m <-summary(lm(log(carteira_ativa) ~ grande_x_micro + hab_x_giro + crise_marco +
+               grande_x_micro*hab_x_giro + +grande_x_micro*crise_marco +
+               hab_x_giro*crise_marco + hab_x_giro*crise_marco*grande_x_micro
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br+ inad,data = df_scr_sem_pf))
+
+tri_diff_g_x_mp <-summary(lm(log(carteira_ativa) ~ grande_x_micro_e_pequeno + hab_x_giro + crise_marco +
+               grande_x_micro_e_pequeno*hab_x_giro + +grande_x_micro_e_pequeno*crise_marco +
+               hab_x_giro*crise_marco + hab_x_giro*crise_marco*grande_x_micro_e_pequeno
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br+ inad,data = df_scr_sem_pf))
+
+tri_diff_g_x_mpe <-summary(lm(log(carteira_ativa) ~ grande_x_mpe + hab_x_giro + crise_marco +
+               grande_x_mpe*hab_x_giro + +grande_x_mpe*crise_marco +
+               hab_x_giro*crise_marco + hab_x_giro*crise_marco*grande_x_mpe
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br+ inad,data = df_scr_sem_pf))
+
+tri_diff_g_med_x_mp <-summary(lm(log(carteira_ativa) ~ g_med_x_mp + hab_x_giro + crise_marco +
+               g_med_x_mp*hab_x_giro + +g_med_x_mp*crise_marco +
+               hab_x_giro*crise_marco + hab_x_giro*crise_marco*g_med_x_mp
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br+ inad,data = df_scr_sem_pf))
+
+
+```
+
+## PLACEBO CONTROLE
+``` {r}
+
+df_scr_sem_pf$invest_x_giro<-ifelse(df_scr_sem_pf$tipos_modalidade == 6, 1,ifelse(df_scr_sem_pf$tipos_modalidade == 1, 0, NA))
+
+ placebo_01 <-summary(lm(log(carteira_ativa) ~ grande_x_micro_e_pequeno + invest_x_giro + crise_marco +
+               grande_x_micro_e_pequeno*invest_x_giro + +grande_x_micro_e_pequeno*crise_marco +
+               invest_x_giro*crise_marco + invest_x_giro*crise_marco*grande_x_micro_e_pequeno
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad,data = df_scr_sem_pf))
+ 
+ placebo_02 <-summary(lm(log(carteira_ativa) ~ grande_x_micro + invest_x_giro + crise_marco +
+               grande_x_micro*invest_x_giro + +grande_x_micro*crise_marco +
+               invest_x_giro*crise_marco + invest_x_giro*crise_marco*grande_x_micro
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad,data = df_scr_sem_pf))
+ 
+ placebo_03 <-summary(lm(log(carteira_ativa) ~ grande_x_mpe + invest_x_giro + crise_marco +
+               grande_x_mpe*invest_x_giro + +grande_x_mpe*crise_marco +
+               invest_x_giro*crise_marco + invest_x_giro*crise_marco*grande_x_mpe
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad,data = df_scr_sem_pf))
+
+ 
+ 
+ placebo_01
+```
+#PLACEBO TRATADO
+``` {r}
+
+df_scr_sem_pf$hab_x_comerx <-ifelse(df_scr_sem_pf$tipos_modalidade == 5 , 1,ifelse(df_scr_sem_pf$tipos_modalidade == 7, 0, NA))
+
+ placebo_04 <-summary(lm(log(carteira_ativa) ~ grande_x_micro_e_pequeno + hab_x_comerx + crise_marco +
+               grande_x_micro_e_pequeno*hab_x_comerx + +grande_x_micro_e_pequeno*crise_marco +
+               hab_x_comerx*crise_marco + hab_x_comerx*crise_marco*grande_x_micro_e_pequeno
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad,data = df_scr_sem_pf))
+ 
+ placebo_05 <-summary(lm(log(carteira_ativa) ~ grande_x_micro + hab_x_comerx + crise_marco +
+               grande_x_micro*hab_x_comerx + +grande_x_micro*crise_marco +
+               hab_x_comerx*crise_marco + hab_x_comerx*crise_marco*grande_x_micro
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad,data = df_scr_sem_pf))
+ 
+ placebo_06 <-summary(lm(log(carteira_ativa) ~ grande_x_mpe + hab_x_comerx + crise_marco +
+               grande_x_mpe*hab_x_comerx + +grande_x_mpe*crise_marco +
+               hab_x_comerx*crise_marco + hab_x_comerx*crise_marco*grande_x_mpe
+           + Taxa_de_juros_Selic_acumulada_no_mes +ln_ibc_br + inad,data = df_scr_sem_pf))
+
+ 
+ 
+ placebo_06
+```
+# DESCRITIVAS
+
+```{r}
+
+  df_pos_marco<- df_scr_sem_pf %>% #OBS APENAS APOS MARCO#
+    filter(crise_marco==1) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  df_pre_marco<- df_scr_sem_pf %>% #OBS APENAS PRE MARCO#
+    filter(crise_marco==0) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(df_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(df_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(df_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(df_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  
+  #Carteira ativa total micro pre e pos crise
+  
+  carteira_ativa_micro_pre_marco <-df_scr_sem_pf %>% 
+    filter(crise_marco==0, tipo_porte==4) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  carteira_ativa_micro_pos_marco <- df_scr_sem_pf %>% 
+    filter(crise_marco==1, tipo_porte==4) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(carteira_ativa_micro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(carteira_ativa_micro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(carteira_ativa_micro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(carteira_ativa_micro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  
+  #Carteira ativa total pequena pre e poscrise
+  
+  carteira_ativa_pequena_pre_marco <- df_scr_sem_pf %>% 
+    filter(crise_marco==0, tipo_porte==5) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  carteira_ativa_pequena_pos_marco <- df_scr_sem_pf %>% 
+    filter(crise_marco==1, tipo_porte==5) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  mean(carteira_ativa_pequena_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(carteira_ativa_pequena_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(carteira_ativa_pequena_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(carteira_ativa_pequena_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  
+  #Carteira ativa total media pre e poscrise
+  
+  carteira_ativa_media_pre_marco <- df_scr_sem_pf %>% 
+    filter(crise_marco==0, tipo_porte==3) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  carteira_ativa_media_pos_marco <- df_scr_sem_pf %>% 
+    filter(crise_marco==1, tipo_porte==3) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+   
+  
+  mean(carteira_ativa_media_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(carteira_ativa_media_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(carteira_ativa_media_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(carteira_ativa_media_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  #Carteira ativa total grande pre e pos crise
+  
+  carteira_ativa_grande_pre_marco <- df_scr_sem_pf %>% 
+    filter(tipo_porte==1,crise_marco==0) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  carteira_ativa_grande_pos_marco <- df_scr_sem_pf %>% 
+    filter(tipo_porte==1,crise_marco==1) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)  
+  
+  mean(carteira_ativa_grande_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(carteira_ativa_grande_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(carteira_ativa_grande_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(carteira_ativa_grande_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  ##CAPITAL DE GIRO
+  capital_de_giro_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  capital_de_giro_pos_marco <-  df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(capital_de_giro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(capital_de_giro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(capital_de_giro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(capital_de_giro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  
+  #carteira ativa #CAPITAL DE GIRO para micro 
+  
+  capital_de_giro_micro_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==4,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  capital_de_giro_micro_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==4,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(capital_de_giro_micro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(capital_de_giro_micro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(capital_de_giro_micro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(capital_de_giro_micro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  #carteira ativa #CAPITAL DE GIRO para pequenas 
+  
+  capital_de_giro_pequena_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==5,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  capital_de_giro_pequena_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==5,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(capital_de_giro_pequena_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(capital_de_giro_pequena_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(capital_de_giro_pequena_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(capital_de_giro_pequena_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  
+  #carteira ativa para medias # CAPITAL DE GIRO 
+  capital_de_giro_media_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==3,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  capital_de_giro_media_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==3,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  mean(capital_de_giro_media_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(capital_de_giro_media_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(capital_de_giro_media_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(capital_de_giro_media_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  #carteira ativa para grande # CAPITAL DE GIRO 
+  capital_de_giro_grande_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==1,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)  
+  
+  capital_de_giro_grande_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==1,tipo_porte==1,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)  
+  
+  mean(capital_de_giro_grande_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(capital_de_giro_grande_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(capital_de_giro_grande_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(capital_de_giro_grande_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  ##Habitacional
+  
+  hab_pre_marco <- df_scr_sem_pf %>% 
+    filter(tipos_modalidade == 5,crise_marco==0) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  hab_pos_marco <- df_scr_sem_pf %>% 
+    filter(tipos_modalidade == 5,crise_marco==1) %>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada))%>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  
+  mean(hab_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(hab_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(hab_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(hab_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+
+  #carteira ativa #Habitacional para micro 
+  
+  hab_micro_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade== 5,tipo_porte==4,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  hab_micro_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==5,tipo_porte==4,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(hab_micro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(hab_micro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(hab_micro_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(hab_micro_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  #carteira ativa # Habitacional para pequenas 
+  
+  hab_pequena_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==5,tipo_porte==5,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  hab_pequena_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade== 5,tipo_porte==5,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)
+  
+  mean(hab_pequena_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(hab_pequena_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(hab_pequena_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(hab_pequena_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  
+  #carteira ativa para medias # Habitacional
+  hab_media_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==5,tipo_porte==3,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  hab_media_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade==5,tipo_porte==3,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000) 
+  
+  mean(hab_media_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(hab_media_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(hab_media_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(hab_media_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  #carteira ativa para grande # Habitacional
+  hab_grande_pre_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade== 5,tipo_porte==1,crise_marco==0)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)  
+  
+  hab_grande_pos_marco <- df_scr_sem_pf %>%
+    filter(tipos_modalidade== 5,tipo_porte==1,crise_marco==1)%>%
+    summarise(carteira_ativa = sum(carteira_ativa),total_carteira_inadimplida_arrastada=sum(carteira_inadimplida_arrastada)) %>%
+    mutate(carteira_ativa_bilhao = carteira_ativa/1000000000)  
+  
+  mean(hab_grande_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  mean(hab_grande_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+  sd(hab_grande_pre_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  sd(hab_grande_pos_marco$carteira_ativa_bilhao,na.rm=TRUE)
+  
+
+```
+
+
